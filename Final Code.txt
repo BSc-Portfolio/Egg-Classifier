@@ -1,0 +1,734 @@
+#include "msp430g2553.h"             //Includes standard libraries for MSP430, the Nokia LCD5110 display, and the math functions.
+#include "LCD5110.h"
+#include "math.h"
+
+//Defining related pins for interfacing with the LCD5110
+#define LCD5110_DC_PIN BIT1          //P1.1
+#define LCD5110_SCE_PIN BIT2         //P1.2
+#define LCD5110_SCLK_PIN BIT5        //P1.5
+#define LCD5110_DN_PIN BIT7          //P1.7
+
+//Configuration to control the LCD5110
+#define LCD5110_COMMAND 0
+#define LCD5110_DATA 1
+#define LCD5110_SET_COMMAND P1OUT &= ~LCD5110_DC_PIN
+#define LCD5110_SET_DATA P1OUT |= LCD5110_DC_PIN
+#define LCD5110_SELECT P1OUT &= ~LCD5110_SCE_PIN
+#define LCD5110_DESELECT P1OUT |= LCD5110_SCE_PIN
+
+//Configuration of SPI Module for the LCD5110
+#define SPI_MSB_FIRST UCB0CTL0 |= UCMSB
+#define SPI_LSB_FIRST UCB0CTL0 &= ~UCMSB
+
+//Defininf of the needed functions for LCD5110
+void lcd_clear();                                                   //Clears the entire LCD screen
+void lcd_init();                                                    //Initializes the LCD for communication and sets up its operating mode
+void lcd_top(unsigned char xAddr, unsigned char yAddr);             //Sets the cursor position to a specific address on the LCD
+void write_lcd(unsigned char dataCommand, unsigned char data);      //Sends a byte of data or a command to the LCD
+void lcd_row(unsigned char bank);                                   //Selects a specific row (bank) on the LCD for writing
+void lcd_string(const char *string);                                //Displays a string of characters on the LCD starting from the current cursor position
+void lcd_char(char c);                                              //Displays a single character (c) on the LCD at the current cursor position
+
+//Defining variables
+int gram = 0;                                                       //Stores weight in grams
+float volt = 0;                                                     //Voltage value coming from ADC converted to floating-point
+int count = 0;                                                      //Egg count
+float total = 0;                                                    //Sum of the weights for multiple eggs
+int total_int = 0;                                                  //Stores the sum of the values being processed
+float avg = 0;                                                      //Stores the average the value(gram) as a floating-point number for more precise calculations
+int avg_int = 0;                                                    //This variable holds the integer part of the average value
+int avg_rmndr = 0;                                                  //Stores the remainder when calculating the average
+int button = 0;                                                     //Represents the state of the button
+int no1, no2, no3, no4, no5, no6, no7, no8, no9, no10;              //All these to hold the weights of up to 30 eggs
+int no11, no12, no13, no14, no15, no16, no17, no18, no19, no20;
+int no21, no22, no23, no24, no25, no26, no27, no28, no29, no30;
+
+
+void main(void)
+{
+    //Watchdog Timer configuration
+    WDTCTL = WDTPW + WDTHOLD;                       //Stops the Watchdog Timer to prevent unwanted resets
+
+    //Clock configuration (Set to 1 MHz for precise timing)
+    BCSCTL1 = CALBC1_1MHZ;
+    DCOCTL = CALDCO_1MHZ;
+
+    //GPIO configuration
+    P1DIR |= BIT1;                                  //Configures specific pins as output
+    P1DIR |= BIT6;
+    P1OUT &= ~BIT6;
+
+    P2DIR &= ~BIT4 + BIT3 + BIT2;                   //Configures P2.2, P2.3, and P2.4 as input with pull-up resistors for buttons
+    P2REN |= BIT4 + BIT3 + BIT2;
+    P2OUT |= BIT4 + BIT3 + BIT2;
+
+    P2IE |= BIT4 + BIT3 + BIT2;                     //Enables interrupts for pins P2.4, P2.3, and P2.2
+    P2IES |= BIT4 + BIT3 + BIT2;                    //Sets the interrupt edge select for P2.4, P2.3, and P2.2 to to detect falling edges
+    P2IFG &= ~BIT4 + BIT3 + BIT2;                   //Clears the interrupt flags for P2.4, P2.3, and P2.2
+
+    P1DIR |= LCD5110_SCE_PIN + LCD5110_DC_PIN;      //Sets the direction of LCD5110_SCE_PIN and LCD5110_DC_PIN as outputs
+    P1OUT |= LCD5110_SCE_PIN + LCD5110_DC_PIN;
+
+    P1SEL |= LCD5110_SCLK_PIN + LCD5110_DN_PIN;     //These two configures LCD5110_SCLK_PIN (SPI clock) and LCD5110_DN_PIN (data) to use the SPI functionality of the hardware
+    P1SEL2 |= LCD5110_SCLK_PIN + LCD5110_DN_PIN;
+
+    //SPI initialization of the LCD5110
+    UCB0CTL0 |= UCCKPH + UCMSB + UCMST + UCSYNC;
+    UCB0CTL1 |= UCSSEL_2;
+    UCB0BR0 |= 0x01;
+    UCB0BR1 = 0;
+    UCB0CTL1 &= ~UCSWRST;
+    _delay_cycles(500000);                          //Adds a delay to stabilize the system before starting communication with the LCD, kind of needed for proper initialization
+
+    //Initialization of the LCD5110 as welcome
+    lcd_init();
+    lcd_clear();
+    lcd_top(0, 0);
+    lcd_row(0);
+    lcd_string("EGG");
+    lcd_row(1);
+    lcd_string("CLASSIFIER");
+    lcd_row(3);
+    lcd_string("2019513022");
+    lcd_row(4);
+    lcd_string("SAMET EKER");
+    _delay_cycles(5000000);
+    lcd_clear();
+
+    lcd_row(1);
+    lcd_string("Push and Start");
+
+    //ADC configuration
+    ADC10CTL0 = SREF_0 + ADC10SHT_2 + ADC10ON;    // ADC on, sample time set
+    ADC10CTL1 = INCH_4;                           // Input channel set to A4
+    ADC10AE0 |= 0x10;                             // Enable analog functionality for P1.4
+
+    _BIS_SR(GIE);          //Enables Global Interrupts
+    while (1)              //The system runs indefinitely, waiting for button presses to trigger actions
+    {
+    }
+}
+
+//ISR configuration
+#pragma vector=PORT2_VECTOR
+__interrupt void Port_2(void)
+{
+
+    //Measuring button configuration
+    if ((P2IN & BIT2) == 0)                             //This checks if pin P2.2 is LOW (button pressed)
+    {
+        button = 1;
+
+        if (button == 1)
+        {
+            lcd_clear();                                //Clears any content displayed on the LCD
+            ADC10CTL0 |= ENC + ADC10SC;                 //Enables ADC and starts the conversion
+            count++;                                    //Tracks the number of button presses
+
+            volt = (ADC10MEM * 4.39) / 1023 - 0.67;     //Converts the ADC result (2^10(10 bit of ADC) = 1024,stored in ADC10MEM) to voltage within the range of 0 to 5V(0.67 is an offset value)
+            gram = (volt * 1000) / 4.39;                //Converts voltage to weight in grams
+
+            lcd_row(1);                                 //Displays weight digit by digit on the LCD
+            lcd_string("WEIGHT: ");
+            lcd_char((gram / 1000) + 0x30);
+            lcd_char(((gram / 100) % 10) + 0x30);
+            lcd_char(((gram / 10) % 10) + 0x30);
+            lcd_char((gram % 10) + 0x30);
+
+            //Categorizing weights into SMALL, MEDIUM, or LARGE and displaying the size
+            if (gram <= 40)
+            {
+                lcd_row(2);
+                lcd_string("Size:SMALL(S)");
+            }
+            else if (gram > 40 && gram < 50)
+            {
+                lcd_row(2);
+                lcd_string("Size:MEDIUM(M)");
+            }
+            else
+            {
+                lcd_row(2);
+                lcd_string("Size:LARGE(L)");
+            }
+
+            //Storing the current weight in one of the variables by order
+            switch (count)
+            {
+            case 1:
+                no1 = gram;
+                break;
+            case 2:
+                no2 = gram;
+                break;
+            case 3:
+                no3 = gram;
+                break;
+            case 4:
+                no4 = gram;
+                break;
+            case 5:
+                no5 = gram;
+                break;
+            case 6:
+                no6 = gram;
+                break;
+            case 7:
+                no7 = gram;
+                break;
+            case 8:
+                no8 = gram;
+                break;
+            case 9:
+                no9 = gram;
+                break;
+            case 10:
+                no10 = gram;
+                break;
+            case 11:
+                no11 = gram;
+                break;
+            case 12:
+                no12 = gram;
+                break;
+            case 13:
+                no13 = gram;
+                break;
+            case 14:
+                no14 = gram;
+                break;
+            case 15:
+                no15 = gram;
+                break;
+            case 16:
+                no16 = gram;
+                break;
+            case 17:
+                no17 = gram;
+                break;
+            case 18:
+                no18 = gram;
+                break;
+            case 19:
+                no19 = gram;
+                break;
+            case 20:
+                no20 = gram;
+                break;
+            case 21:
+                no21 = gram;
+                break;
+            case 22:
+                no22 = gram;
+                break;
+            case 23:
+                no23 = gram;
+                break;
+            case 24:
+                no24 = gram;
+                break;
+            case 25:
+                no25 = gram;
+                break;
+            case 26:
+                no26 = gram;
+                break;
+            case 27:
+                no27 = gram;
+                break;
+            case 28:
+                no28 = gram;
+                break;
+            case 29:
+                no29 = gram;
+                break;
+            case 30:
+                no30 = gram;
+                break;
+            }
+
+            total = no30 + no29 + no28 + no27 + no26 + no25 + no24 + no23 + no22
+                    + no21 + no20 + no19 + no18 + no17 + no16 + no15 + no14
+                    + no13 + no12 + no11 + no10 + no9 + no8 + no7 + no6 + no5
+                    + no4 + no3 + no2 + no1;
+            total_int = total;
+
+            _delay_cycles(100000);
+            button = 0;
+
+        }
+    }
+
+    //Resetting button configuration
+    else if ((P2IN & BIT4) == 0)            //Checks if pin P2.4 is LOW
+    {
+        count = 0;
+        avg = 0;
+        avg_int = 0;
+        avg_rmndr = 0;
+        gram = 0;
+        total_int = 0;
+        total = 0;
+        no1 = 0;
+        no2 = 0;
+        no3 = 0;
+        no4 = 0;
+        no5 = 0;
+        no6 = 0;
+        no7 = 0;
+        no8 = 0;
+        no9 = 0;
+        no10 = 0;
+        no11 = 0;
+        no12 = 0;
+        no13 = 0;
+        no14 = 0;
+        no15 = 0;
+        no16 = 0;
+        no17 = 0;
+        no18 = 0;
+        no19 = 0;
+        no20 = 0;
+        no21 = 0;
+        no22 = 0;
+        no23 = 0;
+        no24 = 0;
+        no25 = 0;
+        no26 = 0;
+        no27 = 0;
+        no28 = 0;
+        no29 = 0;
+        no30 = 0;
+
+        lcd_clear();
+        lcd_row(2);
+        lcd_string("Resetting...");
+        _delay_cycles(1000000);
+
+        lcd_clear();
+
+        lcd_row(1);
+        lcd_string("WEIGHT: ");
+        lcd_char((gram / 1000) + 0x30);
+        lcd_char(((gram / 100) % 10) + 0x30);
+        lcd_char(((gram / 10) % 10) + 0x30);
+        lcd_char((gram % 10) + 0x30);
+
+    }
+
+    //Result button configuration
+    else if ((P2IN & BIT3) == 0)            //Checks if pin P2.3 is LOW, if so; displays the total weight and average weight of all recorded items
+    {
+        _delay_cycles(5000);
+
+        lcd_clear();
+        lcd_row(0);
+        lcd_string("Egg Number: ");
+        lcd_char((count / 10) % 10 + 0x30);
+        lcd_char((count) % 10 + 0x30);
+
+        avg = total / count;
+        avg_int = avg;
+        avg_rmndr = (avg - avg_int) * 100;
+
+        lcd_row(3);
+        lcd_string("Average Weight");
+        lcd_string("   ");
+        lcd_char((avg_int / 100) + 0x30);
+        lcd_char((avg_int / 10) % 10 + 0x30);
+        lcd_char((avg_int % 10) + 0x30);
+        lcd_char(0x2E);
+        lcd_char((avg_rmndr / 10) % 10 + 0x30);
+        lcd_char((avg_rmndr % 10) + 0x30);
+
+        if (count == 0)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 1)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 2)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 3)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 4)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 5)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 6)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 7)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 8)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight  ");
+            lcd_string("     ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 9)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 10)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 11)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 12)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 13)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 14)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 15)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight  ");
+            lcd_string("     ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 16)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 17)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 18)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 19)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 20)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 21)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 22)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight  ");
+            lcd_string("     ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 23)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 24)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 25)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 26)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 27)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 28)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight: ");
+            lcd_string("   ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 29)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight  ");
+            lcd_string("     ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+        else if (count == 30)
+        {
+            lcd_row(1);
+            lcd_string("Total Weight  ");
+            lcd_string("     ");
+            lcd_char((total_int / 1000) + 0x30);
+            lcd_char((total_int / 100) % 10 + 0x30);
+            lcd_char((total_int / 10) % 10 + 0x30);
+            lcd_char((total_int % 10) + 0x30);
+        }
+    }
+
+    P2IFG &= ~BIT4 + BIT3 + BIT2;
+}
+
+//Defining required LCD display functions to manage display operations
+void lcd_clear()
+{
+    lcd_top(0, 0);
+    int c = 0;
+    while (c < PCD8544_MAXBYTES)
+    {
+        write_lcd(LCD5110_DATA, 0);
+        c++;
+    }
+    lcd_top(0, 0);
+}
+
+void lcd_init()
+{
+    write_lcd(LCD5110_COMMAND,
+    PCD8544_FUNCTIONSET | PCD8544_EXTENDEDINSTRUCTION);
+    write_lcd(LCD5110_COMMAND, PCD8544_SETVOP | 0x3F);
+    write_lcd(LCD5110_COMMAND, PCD8544_SETTEMP | 0x02);
+    write_lcd(LCD5110_COMMAND, PCD8544_SETBIAS | 0x03);
+    write_lcd(LCD5110_COMMAND, PCD8544_FUNCTIONSET);
+    write_lcd(LCD5110_COMMAND, PCD8544_DISPLAYCONTROL | PCD8544_DISPLAYNORMAL);
+}
+
+void lcd_top(unsigned char xAddr, unsigned char yAddr)
+{
+    write_lcd(LCD5110_COMMAND, PCD8544_SETXADDR | xAddr);
+    write_lcd(LCD5110_COMMAND, PCD8544_SETYADDR | yAddr);
+}
+
+void write_lcd(unsigned char dataCommand, unsigned char data)
+{
+    LCD5110_SELECT;
+    if (dataCommand)
+    {
+        LCD5110_SET_DATA;
+    }
+    else
+    {
+        LCD5110_SET_COMMAND;
+    }
+    UCB0TXBUF = data;
+    while (!(IFG2 & UCB0TXIFG))
+        ;
+    LCD5110_DESELECT;
+}
+
+void lcd_row(unsigned char bank)
+{
+    lcd_top(0, bank);
+    int c = 0;
+    while (c < PCD8544_HPIXELS)
+    {
+        write_lcd(LCD5110_DATA, 0);
+        c++;
+    }
+    lcd_top(0, bank);
+}
+
+void lcd_string(const char *string)
+{
+    while (*string)
+    {
+        lcd_char(*string++);
+    }
+}
+
+void lcd_char(char c)
+{
+    unsigned char i;
+    for (i = 0; i < 5; i++)
+    {
+        write_lcd(LCD5110_DATA, font[c - 0x20][i]);
+    }
+    write_lcd(LCD5110_DATA, 0);
+}
